@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Million Mosaic — Plain</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* Page: pure white, no UI */
+  html, body { margin:0; padding:0; height:100%; background:#fff; }
+  #field { display:block; width:100vw; height:100vh; cursor:crosshair; }
+
+  /* Modal (minimal) */
+  .overlay {
+    position:fixed; inset:0; background:rgba(0,0,0,0.4);
+    display:none; align-items:center; justify-content:center;
+  }
+  .overlay.on { display:flex; }
+  .modal {
+    width:min(560px, 92vw); background:#fff; border:1px solid #ddd; border-radius:12px;
+    box-shadow:0 10px 40px rgba(0,0,0,.25); padding:16px;
+    font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111;
+  }
+  .modal h2 { margin:0 0 8px 0; font-size:18px; }
+  .modal .price { margin:0 0 12px 0; color:#444; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .drop {
+    width:100%; min-height:120px; border:1px dashed #bbb; border-radius:10px;
+    display:flex; align-items:center; justify-content:center; padding:10px; color:#666;
+  }
+  .thumb { max-width:100%; max-height:200px; margin-top:8px; border-radius:8px; border:1px solid #eee; }
+  .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+  .btn {
+    appearance:none; border:1px solid #ccc; background:#fff; color:#111; padding:8px 12px;
+    border-radius:10px; cursor:pointer;
+  }
+  .btn.primary { background:#111; color:#fff; border-color:#111; }
+  .mini { font-size:12px; color:#666; }
+  a.pay { text-decoration:none; }
+</style>
+</head>
+<body>
+
+<canvas id="field"></canvas>
+
+<!-- Minimal modal -->
+<div class="overlay" id="overlay">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h2 id="mTitle">Cell</h2>
+    <p class="price" id="mPrice">$ — / 1 year</p>
+
+    <div class="row">
+      <div class="drop" id="drop">
+        <input type="file" id="file" accept="image/*" style="display:none">
+        <span id="dropText">Drop your ad image here (or click)</span>
+      </div>
+      <img id="preview" class="thumb" alt="" style="display:none">
+    </div>
+
+    <div class="actions">
+      <button class="btn" id="closeBtn">Close</button>
+      <a class="btn primary pay" id="payBtn" href="#" target="_blank" rel="noopener">Pay</a>
+    </div>
+    <div class="mini">Payment link is a placeholder. Integration will be added later.</div>
+  </div>
+</div>
+
+<script>
+/* ====== Config (you can change) ====== */
+const CELL_COUNT = 1000;          // number of cells
+const WORLD_W = 4000, WORLD_H = 2600;  // virtual world size (bigger = finer mosaic)
+const LINE_COLOR = '#d8d8d8';     // borders (light gray)
+const LINE_WIDTH = 1;
+
+/* ====== Utilities ====== */
+const rnd = (a=0, b=1) => a + Math.random()*(b-a);
+function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+function mix(a, b, t){ return a + (b-a)*t; }
+
+/* ====== Treemap-like random split to 1000 rectangles ====== */
+function makeRect(x,y,w,h){ return {x,y,w,h, area:w*h}; }
+function splitRect(r){
+  // choose orientation: prefer splitting along larger dimension
+  const horizBias = (r.w > r.h) ? 0.8 : 0.2;
+  const horiz = Math.random() < horizBias;
+
+  if (horiz) {
+    const cut = clamp(Math.round(r.w * rnd(0.35, 0.65)), 6, r.w-6);
+    const a = makeRect(r.x, r.y, cut, r.h);
+    const b = makeRect(r.x + cut, r.y, r.w - cut, r.h);
+    return [a,b];
+  } else {
+    const cut = clamp(Math.round(r.h * rnd(0.35, 0.65)), 6, r.h-6);
+    const a = makeRect(r.x, r.y, r.w, cut);
+    const b = makeRect(r.x, r.y + cut, r.w, r.h - cut);
+    return [a,b];
+  }
+}
+
+function buildLayout(count){
+  const list = [ makeRect(0,0, WORLD_W, WORLD_H) ];
+  // Always split the largest area rectangle that can still split
+  while (list.length < count) {
+    // find largest that can split
+    let idx = -1, bestArea = -1;
+    for (let i=0;i<list.length;i++){
+      const r = list[i];
+      if (r.w > 12 || r.h > 12) { // splittable threshold
+        if (r.area > bestArea){ bestArea = r.area; idx = i; }
+      }
+    }
+    if (idx === -1) break; // cannot reach exact count, but with thresholds it should
+    const r = list.splice(idx,1)[0];
+    const [a,b] = splitRect(r);
+    list.push(a,b);
+  }
+  // Recompute ids
+  list.forEach((r,i)=> r.id = i);
+  return list;
+}
+
+/* ====== Pricing: map area -> $1..$10,000 (log-ish + randomness) ====== */
+function assignPrices(cells){
+  let maxA = 0; for (const r of cells) maxA = Math.max(maxA, r.area);
+  for (const r of cells){
+    const norm = r.area / maxA; // 0..1
+    // bias: more area -> higher price, but add randomness to avoid strict ordering
+    const jitter = Math.pow(Math.random(), 2); // 0..1, skewed to lower
+    const base = clamp(0.25*norm + 0.75*jitter, 0, 1);
+    let price = Math.round( 1 + Math.pow(base, 1.2) * (10000 - 1) );
+    price = clamp(price, 1, 10000);
+    r.price = price;
+  }
+}
+
+/* ====== Rendering & hit-testing ====== */
+const canvas = document.getElementById('field');
+const ctx = canvas.getContext('2d');
+
+let DPR = Math.max(1, window.devicePixelRatio || 1);
+let W = 0, H = 0;
+let layout = buildLayout(CELL_COUNT);
+assignPrices(layout);
+
+function fitViewport(){
+  W = Math.floor(window.innerWidth * DPR);
+  H = Math.floor(window.innerHeight * DPR);
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+}
+function draw(){
+  ctx.save();
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,W,H);
+  // compute scale to fit world entirely
+  const scale = Math.min(W / WORLD_W, H / WORLD_H);
+  const ox = (W - WORLD_W*scale)/2;
+  const oy = (H - WORLD_H*scale)/2;
+
+  ctx.lineWidth = Math.max(1, LINE_WIDTH * DPR);
+  ctx.strokeStyle = LINE_COLOR;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0,0,W,H); // pure white background
+
+  // Draw borders only (no text, no fills per cell)
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.scale(scale, scale);
+  for (const r of layout){
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.restore();
+
+  // store transform for hit tests
+  draw._scale = scale; draw._ox = ox; draw._oy = oy;
+}
+window.addEventListener('resize', ()=>{ fitViewport(); draw(); });
+fitViewport(); draw();
+
+/* Point in rect in world coords */
+function hitTest(clientX, clientY){
+  const sx = clientX * DPR, sy = clientY * DPR;
+  const worldX = (sx - draw._ox) / draw._scale;
+  const worldY = (sy - draw._oy) / draw._scale;
+  if (worldX < 0 || worldY < 0 || worldX > WORLD_W || worldY > WORLD_H) return null;
+  // Since rectangles do not overlap, we can binary search if sorted. Simpler: linear scan (1000 ok).
+  for (let i=0;i<layout.length;i++){
+    const r = layout[i];
+    if (worldX >= r.x && worldX <= r.x + r.w && worldY >= r.y && worldY <= r.y + r.h) return r;
+  }
+  return null;
+}
+
+/* ====== Modal logic ====== */
+const overlay = document.getElementById('overlay');
+const mTitle = document.getElementById('mTitle');
+const mPrice = document.getElementById('mPrice');
+const payBtn = document.getElementById('payBtn');
+const closeBtn = document.getElementById('closeBtn');
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+const preview = document.getElementById('preview');
+const dropText = document.getElementById('dropText');
+
+let currentCell = null;
+
+canvas.addEventListener('click', (e)=>{
+  const r = hitTest(e.clientX, e.clientY);
+  if (!r) return;
+  currentCell = r;
+  mTitle.textContent = `Cell #${r.id}`;
+  mPrice.textContent = `$${r.price} / 1 year`;
+  payBtn.href = `#pay-${r.id}-${r.price}`; // placeholder; integrate later
+  preview.style.display = 'none';
+  preview.src = '';
+  overlay.classList.add('on');
+});
+
+closeBtn.addEventListener('click', ()=> overlay.classList.remove('on'));
+overlay.addEventListener('click', (e)=>{ if (e.target === overlay) overlay.classList.remove('on'); });
+document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') overlay.classList.remove('on'); });
+
+drop.addEventListener('click', ()=> fileInput.click());
+drop.addEventListener('dragover', (e)=>{ e.preventDefault(); drop.style.borderColor='#888'; });
+drop.addEventListener('dragleave', ()=>{ drop.style.borderColor='#bbb'; });
+drop.addEventListener('drop', (e)=>{
+  e.preventDefault();
+  drop.style.borderColor='#bbb';
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', (e)=>{
+  if (e.target.files && e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+function handleFile(file){
+  if (!/^image\//.test(file.type)) { alert('Please choose an image file'); return; }
+  const r = new FileReader();
+  r.onload = ()=> {
+    preview.src = r.result;
+    preview.style.display = 'block';
+    dropText.textContent = 'Image selected';
+  };
+  r.readAsDataURL(file);
+}
+
+/* Optional: hover highlight (subtle) — no text */
+(function enableHover(){
+  let lastIdx = -1;
+  canvas.addEventListener('mousemove', (e)=>{
+    const r = hitTest(e.clientX, e.clientY);
+    if (!r){ if (lastIdx !== -1){ draw(); lastIdx=-1; } return; }
+    if (r.id === lastIdx) return;
+    lastIdx = r.id;
+    draw();
+    // draw subtle highlight
+    ctx.save();
+    const scale = draw._scale, ox = draw._ox, oy = draw._oy;
+    ctx.translate(ox, oy); ctx.scale(scale, scale);
+    ctx.fillStyle = 'rgba(0,0,0,0.03)'; // very subtle
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.restore();
+  });
+})();
+</script>
+</body>
+</html>
